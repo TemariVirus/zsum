@@ -140,16 +140,18 @@ pub fn main() !void {
         } else {
             try writeColored(stdout, "Mismatch", .err);
             try stdout.writeAll("\n");
+            std.process.exit(1);
         }
     } else {
         try stdout.print("{}\n", .{std.fmt.fmtSliceHexLower(hash)});
     }
+    std.process.exit(0);
 }
 
 fn printHelpAndExit(args: ArgsResult) noreturn {
     const exe_name = std.fs.path.stem(args.executable_name.?);
     argsParser.printHelp(Args, exe_name, std.io.getStdErr().writer()) catch unreachable;
-    std.process.exit(0);
+    std.process.exit(1);
 }
 
 fn printLengthMismatchAndExit(args: ArgsResult) noreturn {
@@ -159,7 +161,7 @@ fn printLengthMismatchAndExit(args: ArgsResult) noreturn {
         " checksum length. Checksum should be {d} hex digits long.\n",
         .{digestLength(args.options.algo)},
     ) catch unreachable;
-    std.process.exit(0);
+    std.process.exit(1);
 }
 
 fn handleArgsError(err: ArgsError) !void {
