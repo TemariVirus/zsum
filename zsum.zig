@@ -159,7 +159,7 @@ fn printLengthMismatchAndExit(args: ArgsResult) noreturn {
     writeColored(stderr, "Wrong", .err) catch unreachable;
     stderr.print(
         " checksum length. Checksum should be {d} hex digits long.\n",
-        .{digestLength(args.options.algo)},
+        .{2 * digestLength(args.options.algo)},
     ) catch unreachable;
     std.process.exit(1);
 }
