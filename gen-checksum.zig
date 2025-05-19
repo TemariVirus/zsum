@@ -44,7 +44,7 @@ pub fn main() !void {
         const hash = std.mem.trim(
             u8,
             fifo.buf[0..fifo.count],
-            std.ascii.whitespace,
+            &std.ascii.whitespace,
         );
 
         switch (try zsum_proc.wait()) {
