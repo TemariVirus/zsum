@@ -165,6 +165,10 @@ pub fn main() !void {
     }
 
     if (args.positionals.len > 0) dir: {
+        if (std.mem.eql(u8, "-", args.positionals[0])) {
+            break :dir;
+        }
+
         var dir = std.fs.cwd().openDir(args.positionals[0], .{ .iterate = true }) catch |err| switch (err) {
             error.NotDir => break :dir,
             else => return err,
