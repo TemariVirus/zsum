@@ -121,7 +121,7 @@ pub fn main() !void {
     defer args.deinit();
 
     if (args.options.help) {
-        printHelpAndExit(args);
+        printHelpAndExit(args, .help_flag);
     }
 
     const file, const checksum, const is_piped = getPositionalArgs(alloc, args) catch |err|
@@ -163,10 +163,13 @@ pub fn main() !void {
     std.process.exit(0);
 }
 
-fn printHelpAndExit(args: ArgsResult) noreturn {
+fn printHelpAndExit(args: ArgsResult, cause: enum { bad_args, help_flag }) noreturn {
     const exe_name = std.fs.path.stem(args.executable_name.?);
     argsParser.printHelp(Args, exe_name, stderr) catch unreachable;
-    std.process.exit(1);
+    std.process.exit(switch (cause) {
+        .bad_args => 1,
+        .help_flag => 0,
+    });
 }
 
 fn printLengthMismatchAndExit(args: ArgsResult) noreturn {
@@ -199,14 +202,14 @@ fn getPositionalArgs(alloc: Allocator, args: ArgsResult) !struct { std.fs.File, 
         };
     } else {
         const file_path = switch (args.positionals.len) {
-            0 => printHelpAndExit(args),
+            0 => printHelpAndExit(args, .bad_args),
             1 => args.positionals[0],
             else => args.positionals[1],
         };
         file = try std.fs.cwd().openFile(file_path, .{});
         errdefer file.close();
         checksum = switch (args.positionals.len) {
-            0 => printHelpAndExit(args),
+            0 => printHelpAndExit(args, .bad_args),
             1 => null,
             else => try parseHash(alloc, args.positionals[0]),
         };
