@@ -159,6 +159,7 @@ pub fn main() !void {
         }
     } else {
         try stdout.printHex(hash, .lower);
+        try stdout.writeAll("\n");
     }
     std.process.exit(0);
 }
