@@ -71,18 +71,19 @@ const Algo = enum {
 
 const Args = struct {
     algo: Algo = .sha256,
+    checksum: ?[]const u8 = null,
     help: bool = false,
 
     pub const shorthands = .{
         .a = "algo",
+        .c = "checksum",
         .h = "help",
     };
 
     pub const meta = .{
-        .usage_summary = "[options] [checksum] file",
+        .usage_summary = "[options] PATH",
         .full_text = 
-        \\If checksum is provided, check if the file's hash matches the given checksum.
-        \\Otherwise, print the file's hash to stdout.
+        \\Print the hash of PATH to stdout. If PATH is '-', read from stdin.
         \\
         \\file is either a file path or the file's contents piped from stdin.
         \\
@@ -91,6 +92,10 @@ const Args = struct {
 
         .option_docs = .{
             .algo = std.fmt.comptimePrint("The hashing algorithm to use (default: {s}).", .{@tagName((Args{}).algo)}),
+            .checksum =
+            \\The expected hash to check against. If given, no hash will be printed.
+            \\                If the hashes match, exit with code 0. Otherwise, exit with code 1.
+            ,
             .help = "Print this help message and exit.",
         },
     };
@@ -121,20 +126,33 @@ pub fn main() !void {
     defer args.deinit();
 
     if (args.options.help) {
-        printHelpAndExit(args, .help_flag);
+        printErrorAndExit(args, error.HelpFlag);
     }
 
-    const file, const checksum, const is_piped = getPositionalArgs(alloc, args) catch |err|
-        switch (err) {
-            error.InvalidLength => printLengthMismatchAndExit(args),
-            else => return err,
-        };
+    const stdin: std.fs.File = .stdin();
+    const is_piped = !stdin.isTty();
+    const file: std.fs.File = switch (args.positionals.len) {
+        0 => if (is_piped) stdin else printErrorAndExit(args, error.BadArgs),
+        else => if (std.mem.eql(u8, "-", args.positionals[0]))
+            stdin
+        else
+            try std.fs.cwd().openFile(args.positionals[0], .{}),
+    };
+    defer file.close();
+    const checksum = if (args.options.checksum) |check|
+        parseHash(alloc, check) catch |err| switch (err) {
+            error.InvalidLength => printErrorAndExit(args, error.BadChecksumLength),
+            error.InvalidCharacter => printErrorAndExit(args, error.BadChecksum),
+            error.OutOfMemory => return err,
+            error.NoSpaceLeft => unreachable,
+        }
+    else
+        null;
     defer if (checksum) |cs| alloc.free(cs);
-    defer if (!is_piped) file.close();
 
     if (checksum) |cs| {
         if (cs.len != args.options.algo.digestLength()) {
-            printLengthMismatchAndExit(args);
+            printErrorAndExit(args, error.BadChecksumLength);
         }
     }
 
@@ -164,59 +182,45 @@ pub fn main() !void {
     std.process.exit(0);
 }
 
-fn printHelpAndExit(args: ArgsResult, cause: enum { bad_args, help_flag }) noreturn {
-    const exe_name = std.fs.path.stem(args.executable_name.?);
-    argsParser.printHelp(Args, exe_name, stderr) catch unreachable;
-    std.process.exit(switch (cause) {
-        .bad_args => 1,
-        .help_flag => 0,
+fn printErrorAndExit(
+    args: ArgsResult,
+    err: error{
+        BadArgs,
+        HelpFlag,
+        BadChecksum,
+        BadChecksumLength,
+    },
+) noreturn {
+    switch (err) {
+        error.BadArgs, error.HelpFlag => {
+            const exe_name = std.fs.path.stem(args.executable_name.?);
+            argsParser.printHelp(Args, exe_name, stderr) catch unreachable;
+        },
+        error.BadChecksum => {
+            tty_config.setColor(stderr, .red) catch unreachable;
+            stderr.writeAll("Bad") catch unreachable;
+            tty_config.setColor(stderr, .reset) catch unreachable;
+            stderr.writeAll(" checksum. Checksum must be in hexadecimal.\n") catch unreachable;
+        },
+        error.BadChecksumLength => {
+            tty_config.setColor(stderr, .red) catch unreachable;
+            stderr.writeAll("Bad") catch unreachable;
+            tty_config.setColor(stderr, .reset) catch unreachable;
+            stderr.print(
+                " checksum length. Checksum must be {d} hex digits long.\n",
+                .{2 * args.options.algo.digestLength()},
+            ) catch unreachable;
+        },
+    }
+    std.process.exit(switch (err) {
+        error.HelpFlag => 0,
+        else => 1,
     });
-}
-
-fn printLengthMismatchAndExit(args: ArgsResult) noreturn {
-    tty_config.setColor(stderr, .red) catch unreachable;
-    stderr.writeAll("Wrong") catch unreachable;
-    tty_config.setColor(stderr, .reset) catch unreachable;
-    stderr.print(
-        " checksum length. Checksum should be {d} hex digits long.\n",
-        .{2 * args.options.algo.digestLength()},
-    ) catch unreachable;
-    std.process.exit(1);
 }
 
 fn handleArgsError(err: ArgsError) !void {
     try stderr.print("{f}\n", .{err});
     std.process.exit(1);
-}
-
-fn getPositionalArgs(alloc: Allocator, args: ArgsResult) !struct { std.fs.File, ?[]const u8, bool } {
-    var file: std.fs.File = undefined;
-    var checksum: ?[]u8 = undefined;
-
-    const stdin: std.fs.File = .stdin();
-    const is_piped = !stdin.isTty();
-    if (is_piped) {
-        file = stdin;
-        checksum = switch (args.positionals.len) {
-            0 => null,
-            else => try parseHash(alloc, args.positionals[0]),
-        };
-    } else {
-        const file_path = switch (args.positionals.len) {
-            0 => printHelpAndExit(args, .bad_args),
-            1 => args.positionals[0],
-            else => args.positionals[1],
-        };
-        file = try std.fs.cwd().openFile(file_path, .{});
-        errdefer file.close();
-        checksum = switch (args.positionals.len) {
-            0 => printHelpAndExit(args, .bad_args),
-            1 => null,
-            else => try parseHash(alloc, args.positionals[0]),
-        };
-    }
-
-    return .{ file, checksum, is_piped };
 }
 
 fn parseHash(alloc: Allocator, hash: []const u8) ![]u8 {
