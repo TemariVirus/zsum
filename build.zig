@@ -38,16 +38,16 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "release" } },
     };
 
-    const x86_linux_exe = makeReleaseExe(b, .linux, .x86, "x86-zsum");
+    const x86_linux_exe = makeReleaseExe(b, .linux, .x86, "x86-linux-zsum");
     release_step.dependOn(&b.addInstallArtifact(x86_linux_exe, release_install_opts).step);
 
-    const x64_linux_exe = makeReleaseExe(b, .linux, .x86_64, "x86_64-zsum");
+    const x64_linux_exe = makeReleaseExe(b, .linux, .x86_64, "x86_64-linux-zsum");
     release_step.dependOn(&b.addInstallArtifact(x64_linux_exe, release_install_opts).step);
 
-    const x86_windows_exe = makeReleaseExe(b, .windows, .x86, "x86-zsum");
+    const x86_windows_exe = makeReleaseExe(b, .windows, .x86, "x86-windows-zsum");
     release_step.dependOn(&b.addInstallArtifact(x86_windows_exe, release_install_opts).step);
 
-    const x64_windows_exe = makeReleaseExe(b, .windows, .x86_64, "x86_64-zsum");
+    const x64_windows_exe = makeReleaseExe(b, .windows, .x86_64, "x86_64-windows-zsum");
     release_step.dependOn(&b.addInstallArtifact(x64_windows_exe, release_install_opts).step);
 
     release_step.dependOn(&b.addInstallFileWithDir(
