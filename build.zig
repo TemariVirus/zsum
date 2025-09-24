@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zsum",
         .root_module = exe_mod,
+        // TODO: remove the following line when https://github.com/ziglang/zig/issues/25180 is fixed
+        .use_llvm = true,
     });
     b.installArtifact(exe);
 
@@ -99,6 +101,8 @@ fn getChecksum(
             .target = b.resolveTargetQuery(.{}),
             .optimize = .Debug,
         }),
+        // TODO: remove the following line when https://github.com/ziglang/zig/issues/25180 is fixed
+        .use_llvm = true,
     });
 
     const cmd = b.addRunArtifact(exe);

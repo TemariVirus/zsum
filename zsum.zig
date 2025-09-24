@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Writer = std.Io.Writer;
 
 const argsParser = @import("args");
 const ArgsError = argsParser.Error;
@@ -8,7 +9,10 @@ const runtime_safety = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,
     .ReleaseFast, .ReleaseSmall => false,
 };
-var color_output = true;
+
+var stdout: *Writer = undefined;
+var stderr: *Writer = undefined;
+var tty_config: std.Io.tty.Config = undefined;
 
 const Algo = enum {
     blake2b_128,
@@ -57,6 +61,12 @@ const Algo = enum {
             .sha3_512 => hash.sha3.Sha3_512,
         };
     }
+
+    pub fn digestLength(algo: Algo) usize {
+        return switch (algo) {
+            inline else => |s| s.impl().digest_length,
+        };
+    }
 };
 
 const Args = struct {
@@ -97,12 +107,11 @@ pub fn main() !void {
     else
         std.heap.smp_allocator;
 
-    check_color: {
-        const value = std.process.getEnvVarOwned(alloc, "NO_COLOR") catch break :check_color;
-        defer alloc.free(value);
-        color_output = value.len == 0;
-    }
-    const stdout = std.io.getStdOut().writer();
+    var stdout_writer = std.fs.File.stdout().writer(&.{});
+    var stderr_writer = std.fs.File.stderr().writer(&.{});
+    stdout = &stdout_writer.interface;
+    stderr = &stderr_writer.interface;
+    tty_config = .detect(.stdout());
 
     const args = try argsParser.parseForCurrentProcess(
         Args,
@@ -124,48 +133,55 @@ pub fn main() !void {
     defer if (!is_piped) file.close();
 
     if (checksum) |cs| {
-        if (cs.len != digestLength(args.options.algo)) {
+        if (cs.len != args.options.algo.digestLength()) {
             printLengthMismatchAndExit(args);
         }
     }
 
-    const hash = try hashFile(alloc, file, args.options.algo);
+    const hash = switch (args.options.algo) {
+        inline else => |a| try hashFileAny(a.impl(), alloc, file),
+    };
     defer alloc.free(hash);
 
     if (checksum) |cs| {
         if (std.mem.eql(u8, cs, hash)) {
             try stdout.writeAll("Hashes ");
-            try writeColored(stdout, "match", .ok);
+            try tty_config.setColor(stdout, .green);
+            try stdout.writeAll("match");
+            try tty_config.setColor(stdout, .reset);
             try stdout.writeAll("\n");
         } else {
-            try writeColored(stdout, "Mismatch", .err);
+            try tty_config.setColor(stdout, .red);
+            try stdout.writeAll("Mismatch");
+            try tty_config.setColor(stdout, .reset);
             try stdout.writeAll("\n");
             std.process.exit(1);
         }
     } else {
-        try stdout.print("{}\n", .{std.fmt.fmtSliceHexLower(hash)});
+        try stdout.printHex(hash, .lower);
     }
     std.process.exit(0);
 }
 
 fn printHelpAndExit(args: ArgsResult) noreturn {
     const exe_name = std.fs.path.stem(args.executable_name.?);
-    argsParser.printHelp(Args, exe_name, std.io.getStdErr().writer()) catch unreachable;
+    argsParser.printHelp(Args, exe_name, stderr) catch unreachable;
     std.process.exit(1);
 }
 
 fn printLengthMismatchAndExit(args: ArgsResult) noreturn {
-    const stderr = std.io.getStdErr().writer();
-    writeColored(stderr, "Wrong", .err) catch unreachable;
+    tty_config.setColor(stderr, .red) catch unreachable;
+    stderr.writeAll("Wrong") catch unreachable;
+    tty_config.setColor(stderr, .reset) catch unreachable;
     stderr.print(
         " checksum length. Checksum should be {d} hex digits long.\n",
-        .{2 * digestLength(args.options.algo)},
+        .{2 * args.options.algo.digestLength()},
     ) catch unreachable;
     std.process.exit(1);
 }
 
 fn handleArgsError(err: ArgsError) !void {
-    try std.io.getStdErr().writer().print("{}\n", .{err});
+    try stderr.print("{f}\n", .{err});
     std.process.exit(1);
 }
 
@@ -173,9 +189,10 @@ fn getPositionalArgs(alloc: Allocator, args: ArgsResult) !struct { std.fs.File, 
     var file: std.fs.File = undefined;
     var checksum: ?[]u8 = undefined;
 
-    const is_piped = !std.io.getStdIn().isTty();
+    const stdin: std.fs.File = .stdin();
+    const is_piped = !stdin.isTty();
     if (is_piped) {
-        file = std.io.getStdIn();
+        file = stdin;
         checksum = switch (args.positionals.len) {
             0 => null,
             else => try parseHash(alloc, args.positionals[0]),
@@ -204,54 +221,19 @@ fn parseHash(alloc: Allocator, hash: []const u8) ![]u8 {
     return std.fmt.hexToBytes(bytes, hash);
 }
 
-fn digestLength(algo: Algo) usize {
-    return switch (algo) {
-        inline else => |s| s.impl().digest_length,
-    };
-}
-
-fn hashFile(alloc: Allocator, file: std.fs.File, algo: Algo) ![]u8 {
-    return switch (algo) {
-        inline else => |s| hashFileAny(s.impl(), alloc, file),
-    };
-}
-
 fn hashFileAny(Hasher: type, alloc: Allocator, file: std.fs.File) ![]u8 {
-    var hasher: Hasher = .init(.{});
-
-    var file_buf: [4096]u8 = undefined;
-    while (true) {
-        const len = try file.readAll(&file_buf);
-        hasher.update(file_buf[0..len]);
-        if (len < file_buf.len) break;
-    }
+    var buf: [4096]u8 = undefined;
+    var reader = file.reader(&.{});
+    var hashing: std.Io.Writer.Hashing(Hasher) = .init(&buf);
+    _ = try hashing.writer.sendFileAll(&reader, .unlimited);
+    try hashing.writer.flush();
 
     const hash = try alloc.alloc(u8, Hasher.digest_length);
-    hasher.final(@ptrCast(hash));
+    hashing.hasher.final(@ptrCast(hash));
     return hash;
 }
 
-fn writeColored(writer: anytype, text: []const u8, status: enum { ok, err }) !void {
-    const CSI = "\x1b[";
-    const OK = CSI ++ "32m";
-    const ERR = CSI ++ "31m";
-    const RESET = CSI ++ "39m";
-
-    const color = switch (status) {
-        .ok => OK,
-        .err => ERR,
-    };
-
-    if (color_output) {
-        try writer.writeAll(color);
-    }
-    try writer.writeAll(text);
-    if (color_output) {
-        try writer.writeAll(RESET);
-    }
-}
-
-fn writeEnumValues(Enum: type, writer: anytype) !void {
+fn writeEnumValues(Enum: type, writer: *Writer) !void {
     try writer.writeAll("Supported hashing algorithms:");
     for (@typeInfo(Enum).@"enum".fields) |field| {
         try writer.writeAll("\n  " ++ field.name);
@@ -259,16 +241,16 @@ fn writeEnumValues(Enum: type, writer: anytype) !void {
 }
 
 fn enumValuesHelp(Enum: type) []const u8 {
-    const help_len = blk: {
-        var counter = std.io.countingWriter(std.io.null_writer);
-        writeEnumValues(Enum, counter.writer()) catch unreachable;
-        break :blk counter.bytes_written;
+    const help_text = comptime blk: {
+        var counter: std.Io.Writer.Discarding = .init(&.{});
+        writeEnumValues(Enum, &counter.writer) catch unreachable;
+        const help_len = counter.count;
+
+        var buf: [help_len]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buf);
+        writeEnumValues(Enum, &writer) catch unreachable;
+        break :blk buf;
     };
 
-    var buf: [help_len]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
-    writeEnumValues(Enum, writer) catch unreachable;
-
-    return fbs.getWritten();
+    return &help_text;
 }

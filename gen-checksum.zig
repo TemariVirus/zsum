@@ -8,18 +8,15 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    const stdout = std.io.getStdOut().writer();
+    var stdout = std.fs.File.stdout().writer(&.{});
 
     _ = args.skip(); // Skip exe name
     const zsum_path = args.next().?;
-    std.log.err("zsum: '{s}'", .{zsum_path});
+    std.log.info("zsum: '{s}'", .{zsum_path});
     while (args.next()) |arg| {
         var zsum_proc: std.process.Child = .init(&.{ zsum_path, "--algo", "sha256" }, allocator);
         zsum_proc.stdin_behavior = .Pipe;
         zsum_proc.stdout_behavior = .Pipe;
-
-        const file = try std.fs.openFileAbsolute(arg, .{});
-        defer file.close();
 
         try zsum_proc.spawn();
         errdefer {
@@ -27,11 +24,20 @@ pub fn main() !void {
         }
         try zsum_proc.waitForSpawn();
 
-        try zsum_proc.stdin.?.writeFileAll(file, .{});
+        {
+            const file = try std.fs.cwd().openFile(arg, .{});
+            defer file.close();
+            var reader = file.reader(&.{});
+
+            var write_buf: [4096]u8 = undefined;
+            var stdin = zsum_proc.stdin.?.writer(&write_buf);
+            _ = try stdin.interface.sendFileAll(&reader, .unlimited);
+            try stdin.interface.flush();
+        }
         zsum_proc.stdin.?.close();
         zsum_proc.stdin = null;
 
-        var poller = std.io.poll(
+        var poller = std.Io.poll(
             allocator,
             enum { stdout },
             .{ .stdout = zsum_proc.stdout.? },
@@ -39,11 +45,10 @@ pub fn main() !void {
         defer poller.deinit();
         while (try poller.poll()) {}
 
-        const fifo = poller.fifo(.stdout);
-        if (fifo.head != 0) fifo.realign();
+        const reader = poller.reader(.stdout);
         const hash = std.mem.trim(
             u8,
-            fifo.buf[0..fifo.count],
+            reader.buffered(),
             &std.ascii.whitespace,
         );
 
@@ -61,7 +66,8 @@ pub fn main() !void {
             },
         }
 
-        std.log.err("{s}    {s}", .{ hash, std.fs.path.basename(arg) });
-        try stdout.print("{s}    {s}\n", .{ hash, std.fs.path.basename(arg) });
+        std.log.info("{s}    {s}", .{ hash, std.fs.path.basename(arg) });
+        try stdout.interface.print("{s}    {s}\n", .{ hash, std.fs.path.basename(arg) });
     }
+    try stdout.interface.flush();
 }
