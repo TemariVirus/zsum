@@ -5,6 +5,8 @@ const Writer = std.Io.Writer;
 const argsParser = @import("args");
 const ArgsError = argsParser.Error;
 
+const SortedWalker = @import("SortedWalker.zig");
+
 const runtime_safety = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,
     .ReleaseFast, .ReleaseSmall => false,
@@ -35,6 +37,14 @@ const Algo = enum {
     sha3_256,
     sha3_384,
     sha3_512,
+
+    pub const MAX_DIGEST_LENGTH = blk: {
+        var max: usize = 0;
+        for (std.meta.tags(Algo)) |tag| {
+            max = @max(max, tag.digestLength());
+        }
+        break :blk max;
+    };
 
     pub fn impl(algo: Algo) type {
         const hash = std.crypto.hash;
@@ -73,11 +83,13 @@ const Args = struct {
     algo: Algo = .sha256,
     checksum: ?[]const u8 = null,
     help: bool = false,
+    list: bool = false,
 
     pub const shorthands = .{
         .a = "algo",
         .c = "checksum",
         .h = "help",
+        .l = "list",
     };
 
     pub const meta = .{
@@ -85,7 +97,8 @@ const Args = struct {
         .full_text = 
         \\Print the hash of PATH to stdout. If PATH is '-', read from stdin.
         \\
-        \\file is either a file path or the file's contents piped from stdin.
+        \\If PATH is a file, hash the contents of the file.
+        \\If PATH is a directory, hash the file paths and their contents. Empty directories are ignored.
         \\
         \\
     ++ enumValuesHelp(Algo),
@@ -97,6 +110,7 @@ const Args = struct {
             \\                If the hashes match, exit with code 0. Otherwise, exit with code 1.
             ,
             .help = "Print this help message and exit.",
+            .list = "List all files in the directory and their hashes. If given, PATH must be a directory.",
         },
     };
 };
@@ -128,17 +142,11 @@ pub fn main() !void {
     if (args.options.help) {
         printErrorAndExit(args, error.HelpFlag);
     }
+    if (args.options.list and args.options.checksum != null) {
+        try stderr.writeAll("--list and --check cannot be used together.\n");
+        std.process.exit(1);
+    }
 
-    const stdin: std.fs.File = .stdin();
-    const is_piped = !stdin.isTty();
-    const file: std.fs.File = switch (args.positionals.len) {
-        0 => if (is_piped) stdin else printErrorAndExit(args, error.BadArgs),
-        else => if (std.mem.eql(u8, "-", args.positionals[0]))
-            stdin
-        else
-            try std.fs.cwd().openFile(args.positionals[0], .{}),
-    };
-    defer file.close();
     const checksum = if (args.options.checksum) |check|
         parseHash(alloc, check) catch |err| switch (err) {
             error.InvalidLength => printErrorAndExit(args, error.BadChecksumLength),
@@ -156,11 +164,40 @@ pub fn main() !void {
         }
     }
 
-    const hash = switch (args.options.algo) {
-        inline else => |a| try hashFileAny(a.impl(), alloc, file),
-    };
-    defer alloc.free(hash);
+    if (args.positionals.len > 0) dir: {
+        var dir = std.fs.cwd().openDir(args.positionals[0], .{ .iterate = true }) catch |err| switch (err) {
+            error.NotDir => break :dir,
+            else => return err,
+        };
+        defer dir.close();
 
+        var walker: SortedWalker = try .init(alloc, dir);
+        defer walker.deinit();
+
+        switch (args.options.algo) {
+            inline else => |a| try hashDirAndExit(a.impl(), &walker, args.options.list, checksum),
+        }
+    }
+
+    const stdin: std.fs.File = .stdin();
+    const is_piped = !stdin.isTty();
+    const file: std.fs.File = switch (args.positionals.len) {
+        0 => if (is_piped) stdin else printErrorAndExit(args, error.BadArgs),
+        else => if (std.mem.eql(u8, "-", args.positionals[0]))
+            stdin
+        else
+            try std.fs.cwd().openFile(args.positionals[0], .{}),
+    };
+    defer file.close();
+
+    var hash_buf: [Algo.MAX_DIGEST_LENGTH]u8 = undefined;
+    const hash = switch (args.options.algo) {
+        inline else => |a| try hashFile(a.impl(), file, &hash_buf),
+    };
+    try printResultAndExit(args.options.checksum, hash);
+}
+
+fn printResultAndExit(checksum: ?[]const u8, hash: []const u8) !noreturn {
     if (checksum) |cs| {
         if (std.mem.eql(u8, cs, hash)) {
             try stdout.writeAll("Hashes ");
@@ -194,22 +231,22 @@ fn printErrorAndExit(
     switch (err) {
         error.BadArgs, error.HelpFlag => {
             const exe_name = std.fs.path.stem(args.executable_name.?);
-            argsParser.printHelp(Args, exe_name, stderr) catch unreachable;
+            argsParser.printHelp(Args, exe_name, stderr) catch {};
         },
         error.BadChecksum => {
-            tty_config.setColor(stderr, .red) catch unreachable;
-            stderr.writeAll("Bad") catch unreachable;
-            tty_config.setColor(stderr, .reset) catch unreachable;
-            stderr.writeAll(" checksum. Checksum must be in hexadecimal.\n") catch unreachable;
+            tty_config.setColor(stderr, .red) catch {};
+            stderr.writeAll("Bad") catch {};
+            tty_config.setColor(stderr, .reset) catch {};
+            stderr.writeAll(" checksum. Checksum must be in hexadecimal.\n") catch {};
         },
         error.BadChecksumLength => {
-            tty_config.setColor(stderr, .red) catch unreachable;
-            stderr.writeAll("Bad") catch unreachable;
-            tty_config.setColor(stderr, .reset) catch unreachable;
+            tty_config.setColor(stderr, .red) catch {};
+            stderr.writeAll("Bad") catch {};
+            tty_config.setColor(stderr, .reset) catch {};
             stderr.print(
                 " checksum length. Checksum must be {d} hex digits long.\n",
                 .{2 * args.options.algo.digestLength()},
-            ) catch unreachable;
+            ) catch {};
         },
     }
     std.process.exit(switch (err) {
@@ -229,16 +266,51 @@ fn parseHash(alloc: Allocator, hash: []const u8) ![]u8 {
     return std.fmt.hexToBytes(bytes, hash);
 }
 
-fn hashFileAny(Hasher: type, alloc: Allocator, file: std.fs.File) ![]u8 {
+fn hashFile(Hasher: type, file: std.fs.File, out: []u8) ![]u8 {
     var buf: [64 * 1024]u8 = undefined;
     var reader = file.reader(&.{});
     var hashing: std.Io.Writer.Hashing(Hasher) = .init(&buf);
     _ = try hashing.writer.sendFileAll(&reader, .unlimited);
     try hashing.writer.flush();
 
-    const hash = try alloc.alloc(u8, Hasher.digest_length);
-    hashing.hasher.final(@ptrCast(hash));
-    return hash;
+    hashing.hasher.final(@ptrCast(out));
+    return out[0..Hasher.digest_length];
+}
+
+fn hashDirAndExit(
+    Hasher: type,
+    walker: *SortedWalker,
+    list: bool,
+    checksum: ?[]const u8,
+) !void {
+    var hash_buf: [Algo.MAX_DIGEST_LENGTH]u8 = undefined;
+    var hasher: Hasher = .init(.{});
+
+    while (try walker.next()) |entry| {
+        switch (entry.kind) {
+            .file, .sym_link => {},
+            else => continue,
+        }
+
+        const file = try entry.dir.openFileZ(entry.basename, .{});
+        defer file.close();
+
+        const hash = try hashFile(Hasher, file, &hash_buf);
+        if (list) {
+            try stdout.printHex(hash, .lower);
+            try stdout.print("    {s}\n", .{entry.path});
+        } else {
+            hasher.update(entry.path);
+            hasher.update(&[_]u8{0}); // null byte as separator
+            hasher.update(hash);
+        }
+    }
+
+    if (!list) {
+        hasher.final(@ptrCast(&hash_buf));
+        try printResultAndExit(checksum, hash_buf[0..Hasher.digest_length]);
+    }
+    std.process.exit(0);
 }
 
 fn writeEnumValues(Enum: type, writer: *Writer) !void {
