@@ -222,7 +222,7 @@ fn parseHash(alloc: Allocator, hash: []const u8) ![]u8 {
 }
 
 fn hashFileAny(Hasher: type, alloc: Allocator, file: std.fs.File) ![]u8 {
-    var buf: [4096]u8 = undefined;
+    var buf: [64 * 1024]u8 = undefined;
     var reader = file.reader(&.{});
     var hashing: std.Io.Writer.Hashing(Hasher) = .init(&buf);
     _ = try hashing.writer.sendFileAll(&reader, .unlimited);
