@@ -130,8 +130,10 @@ pub fn main() !void {
     else
         std.heap.smp_allocator;
 
+    var stderr_buf: [512]u8 = undefined;
+    // Very little data is written to stdout, so buffering is inconsequential
     var stdout_writer = std.fs.File.stdout().writer(&.{});
-    var stderr_writer = std.fs.File.stderr().writer(&.{});
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
     stdout = &stdout_writer.interface;
     stderr = &stderr_writer.interface;
     tty_config = .detect(.stdout());
@@ -210,6 +212,7 @@ pub fn main() !void {
     };
     if (args.options.verbose) {
         printStats(@intCast(hashed_bytes), start_nanos, std.time.nanoTimestamp(), .all) catch {};
+        stderr.flush() catch {};
     }
     try printResultAndExit(args.options.checksum, hash);
 }
@@ -292,6 +295,7 @@ fn printErrorAndExit(
             stderr.writeAll("--list and --check cannot be used together.\n") catch {};
         },
     }
+    stderr.flush() catch {};
     std.process.exit(switch (err) {
         error.HelpFlag => 0,
         else => 1,
@@ -299,7 +303,8 @@ fn printErrorAndExit(
 }
 
 fn handleArgsError(err: ArgsError) !void {
-    try stderr.print("{f}\n", .{err});
+    stderr.print("{f}\n", .{err}) catch {};
+    stderr.flush() catch {};
     std.process.exit(1);
 }
 
@@ -350,9 +355,11 @@ fn hashDirAndExit(
         if (verbose) {
             printStats(@intCast(hashed_bytes), file_start_nanos, std.time.nanoTimestamp(), .speed) catch {};
             if (list) {
+                // Align with ther path printed to stdout
                 stderr.splatByteAll(' ', 2 * Hasher.digest_length - 8) catch {};
             }
             stderr.print(" {s}\n", .{entry.path}) catch {};
+            stderr.flush() catch {};
         }
         if (list) {
             try stdout.printHex(hash, .lower);
@@ -369,6 +376,7 @@ fn hashDirAndExit(
 
     if (verbose) {
         printStats(total_hashed_bytes, start_nanos, std.time.nanoTimestamp(), .all) catch {};
+        stderr.flush() catch {};
     }
     if (!list) {
         hasher.final(@ptrCast(&hash_buf));
