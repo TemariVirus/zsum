@@ -5,12 +5,13 @@ zsum is a command-line tool that calculates the checksum of a file, and optional
 ## Usage
 
 ```
-Usage: zsum [options] [checksum] file
+Usage: zsum [options] PATH
 
-If checksum is provided, check if the file's hash matches the given checksum.
-Otherwise, print the file's hash to stdout.
+Print the hash of PATH to stdout. If PATH is '-', read from stdin.
 
-file is either a file path or the file's contents piped from stdin.
+If PATH is a file, hash the contents of the file.
+If PATH is a directory, hash the file paths and their contents.
+Empty directories and file metadata are ignored.
 
 Supported hashing algorithms:
   blake2b_128
@@ -35,8 +36,12 @@ Supported hashing algorithms:
   sha3_512
 
 Options:
-  -a, --algo   The hashing algorithm to use (default: sha256).
-  -h, --help   Print this help message and exit.
+  -a, --algo       The hashing algorithm to use (default: sha256).
+  -c, --checksum   The expected hash to check against. If given, no hash will be printed.
+                   If the hashes match, exit with code 0. Otherwise, exit with code 1.
+  -h, --help       Print this help message and exit.
+  -l, --list       List all files in the directory and their hashes. If given, PATH must be a directory.
+  -v, --verbose    Print stats to stderr.
 ```
 
 ## Why?
