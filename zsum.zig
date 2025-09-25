@@ -304,9 +304,12 @@ fn hashDirAndExit(
             try stdout.printHex(hash, .lower);
             try stdout.print("    {s}\n", .{entry.path});
         } else {
-            hasher.update(entry.path);
-            hasher.update(&[_]u8{0}); // null byte as separator
-            hasher.update(hash);
+            var sub_hasher: Hasher = .init(.{});
+            // Include terminating null byte as separator
+            sub_hasher.update(entry.path[0..entry.path.len]);
+            sub_hasher.update(hash);
+            sub_hasher.final(@ptrCast(&hash_buf));
+            hasher.update(hash_buf[0..Hasher.digest_length]);
         }
     }
 
