@@ -84,12 +84,14 @@ const Args = struct {
     checksum: ?[]const u8 = null,
     help: bool = false,
     list: bool = false,
+    verbose: bool = false,
 
     pub const shorthands = .{
         .a = "algo",
         .c = "checksum",
         .h = "help",
         .l = "list",
+        .v = "verbose",
     };
 
     pub const meta = .{
@@ -98,7 +100,8 @@ const Args = struct {
         \\Print the hash of PATH to stdout. If PATH is '-', read from stdin.
         \\
         \\If PATH is a file, hash the contents of the file.
-        \\If PATH is a directory, hash the file paths and their contents. Empty directories are ignored.
+        \\If PATH is a directory, hash the file paths and their contents.
+        \\Empty directories and file metadata are ignored.
         \\
         \\
     ++ enumValuesHelp(Algo),
@@ -107,10 +110,11 @@ const Args = struct {
             .algo = std.fmt.comptimePrint("The hashing algorithm to use (default: {s}).", .{@tagName((Args{}).algo)}),
             .checksum =
             \\The expected hash to check against. If given, no hash will be printed.
-            \\                If the hashes match, exit with code 0. Otherwise, exit with code 1.
+            \\                   If the hashes match, exit with code 0. Otherwise, exit with code 1.
             ,
             .help = "Print this help message and exit.",
             .list = "List all files in the directory and their hashes. If given, PATH must be a directory.",
+            .verbose = "Print stats to stderr.",
         },
     };
 };
@@ -143,8 +147,7 @@ pub fn main() !void {
         printErrorAndExit(args, error.HelpFlag);
     }
     if (args.options.list and args.options.checksum != null) {
-        try stderr.writeAll("--list and --check cannot be used together.\n");
-        std.process.exit(1);
+        printErrorAndExit(args, error.ListChecksumFlagConflict);
     }
 
     const checksum = if (args.options.checksum) |check|
@@ -179,10 +182,17 @@ pub fn main() !void {
         defer walker.deinit();
 
         switch (args.options.algo) {
-            inline else => |a| try hashDirAndExit(a.impl(), &walker, args.options.list, checksum),
+            inline else => |a| try hashDirAndExit(
+                a.impl(),
+                &walker,
+                checksum,
+                args.options.list,
+                args.options.verbose,
+            ),
         }
     }
 
+    const start_nanos = std.time.nanoTimestamp();
     const stdin: std.fs.File = .stdin();
     const is_piped = !stdin.isTty();
     const file: std.fs.File = switch (args.positionals.len) {
@@ -195,9 +205,12 @@ pub fn main() !void {
     defer file.close();
 
     var hash_buf: [Algo.MAX_DIGEST_LENGTH]u8 = undefined;
-    const hash = switch (args.options.algo) {
+    const hash, const hashed_bytes = switch (args.options.algo) {
         inline else => |a| try hashFile(a.impl(), file, &hash_buf),
     };
+    if (args.options.verbose) {
+        printStats(@intCast(hashed_bytes), start_nanos, std.time.nanoTimestamp(), .all) catch {};
+    }
     try printResultAndExit(args.options.checksum, hash);
 }
 
@@ -223,6 +236,28 @@ fn printResultAndExit(checksum: ?[]const u8, hash: []const u8) !noreturn {
     std.process.exit(0);
 }
 
+fn printStats(
+    hashed_bytes: u64,
+    start_nanos: i128,
+    end_nanos: i128,
+    mode: enum { all, speed },
+) !void {
+    const nanoseconds: u64 = @intCast(@max(1, end_nanos - start_nanos));
+    // Cast to u128 to avoid overflow when multiplying
+    const bytes_per_second = @as(u128, hashed_bytes) * std.time.ns_per_s / nanoseconds;
+    switch (mode) {
+        .all => try stderr.print(
+            "Hashed {Bi:>9.2} in {D:>9} {Bi:>9.2}/s\n",
+            .{
+                hashed_bytes,
+                nanoseconds,
+                @as(u64, @intCast(bytes_per_second)),
+            },
+        ),
+        .speed => try stderr.print("{Bi:>9.2}/s", .{@as(u64, @intCast(bytes_per_second))}),
+    }
+}
+
 fn printErrorAndExit(
     args: ArgsResult,
     err: error{
@@ -230,6 +265,7 @@ fn printErrorAndExit(
         HelpFlag,
         BadChecksum,
         BadChecksumLength,
+        ListChecksumFlagConflict,
     },
 ) noreturn {
     switch (err) {
@@ -252,6 +288,9 @@ fn printErrorAndExit(
                 .{2 * args.options.algo.digestLength()},
             ) catch {};
         },
+        error.ListChecksumFlagConflict => {
+            stderr.writeAll("--list and --check cannot be used together.\n") catch {};
+        },
     }
     std.process.exit(switch (err) {
         error.HelpFlag => 0,
@@ -270,25 +309,31 @@ fn parseHash(alloc: Allocator, hash: []const u8) ![]u8 {
     return std.fmt.hexToBytes(bytes, hash);
 }
 
-fn hashFile(Hasher: type, file: std.fs.File, out: []u8) ![]u8 {
+fn hashFile(Hasher: type, file: std.fs.File, out: []u8) !struct { []u8, usize } {
     var buf: [64 * 1024]u8 = undefined;
     var reader = file.reader(&.{});
     var hashing: std.Io.Writer.Hashing(Hasher) = .init(&buf);
-    _ = try hashing.writer.sendFileAll(&reader, .unlimited);
+    const hashed_btyes = try hashing.writer.sendFileAll(&reader, .unlimited);
     try hashing.writer.flush();
 
     hashing.hasher.final(@ptrCast(out));
-    return out[0..Hasher.digest_length];
+    return .{
+        out[0..Hasher.digest_length],
+        hashed_btyes,
+    };
 }
 
 fn hashDirAndExit(
     Hasher: type,
     walker: *SortedWalker,
-    list: bool,
     checksum: ?[]const u8,
-) !void {
+    list: bool,
+    verbose: bool,
+) !noreturn {
     var hash_buf: [Algo.MAX_DIGEST_LENGTH]u8 = undefined;
     var hasher: Hasher = .init(.{});
+    const start_nanos = std.time.nanoTimestamp();
+    var total_hashed_bytes: u64 = 0;
 
     while (try walker.next()) |entry| {
         switch (entry.kind) {
@@ -299,7 +344,16 @@ fn hashDirAndExit(
         const file = try entry.dir.openFileZ(entry.basename, .{});
         defer file.close();
 
-        const hash = try hashFile(Hasher, file, &hash_buf);
+        const file_start_nanos = std.time.nanoTimestamp();
+        const hash, const hashed_bytes = try hashFile(Hasher, file, &hash_buf);
+        total_hashed_bytes += @intCast(hashed_bytes);
+        if (verbose) {
+            printStats(@intCast(hashed_bytes), file_start_nanos, std.time.nanoTimestamp(), .speed) catch {};
+            if (list) {
+                stderr.splatByteAll(' ', 2 * Hasher.digest_length - 8) catch {};
+            }
+            stderr.print(" {s}\n", .{entry.path}) catch {};
+        }
         if (list) {
             try stdout.printHex(hash, .lower);
             try stdout.print("    {s}\n", .{entry.path});
@@ -313,6 +367,9 @@ fn hashDirAndExit(
         }
     }
 
+    if (verbose) {
+        printStats(total_hashed_bytes, start_nanos, std.time.nanoTimestamp(), .all) catch {};
+    }
     if (!list) {
         hasher.final(@ptrCast(&hash_buf));
         try printResultAndExit(checksum, hash_buf[0..Hasher.digest_length]);
