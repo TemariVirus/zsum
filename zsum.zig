@@ -214,7 +214,7 @@ pub fn main() !void {
         printStats(@intCast(hashed_bytes), start_nanos, std.time.nanoTimestamp(), .all) catch {};
         stderr.flush() catch {};
     }
-    try printResultAndExit(args.options.checksum, hash);
+    try printResultAndExit(checksum, hash);
 }
 
 fn printResultAndExit(checksum: ?[]const u8, hash: []const u8) !noreturn {
