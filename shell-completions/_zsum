@@ -28,6 +28,7 @@ _zsum() {
         '(-h --help)'{-h,--help}'[Print the help message]' \
         '(-l --list -c --checksum)'{-l,--list}'[List all files in the directory and their hashes]' \
         '(-v --verbose)'{-v,--verbose}'[Print stats to stderr]' \
+        '--version[Print program version]' \
         '1:path:_files'
 }
 

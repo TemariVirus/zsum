@@ -6,6 +6,7 @@ const argsParser = @import("args");
 const ArgsError = argsParser.Error;
 
 const SortedWalker = @import("SortedWalker.zig");
+const options = @import("options");
 
 const runtime_safety = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,
@@ -85,6 +86,7 @@ const Args = struct {
     help: bool = false,
     list: bool = false,
     verbose: bool = false,
+    version: bool = false,
 
     pub const shorthands = .{
         .a = "algo",
@@ -115,6 +117,7 @@ const Args = struct {
             .help = "Print this help message and exit.",
             .list = "List all files in the directory and their hashes. If given, PATH must be a directory.",
             .verbose = "Print stats to stderr.",
+            .version = "Print program version and exit.",
         },
     };
 };
@@ -147,6 +150,11 @@ pub fn main() !void {
 
     if (args.options.help) {
         printErrorAndExit(args, error.HelpFlag);
+    }
+    if (args.options.version) {
+        stdout.writeAll(options.version ++ "\n") catch {};
+        stdout.flush() catch {};
+        std.process.exit(0);
     }
     if (args.options.list and args.options.checksum != null) {
         printErrorAndExit(args, error.ListChecksumFlagConflict);

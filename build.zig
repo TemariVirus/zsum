@@ -5,22 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Run step
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("zsum.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{
-            .name = "args",
-            .module = b.dependency("args", .{}).module("args"),
-        }},
-    });
-
-    const exe = b.addExecutable(.{
-        .name = "zsum",
-        .root_module = exe_mod,
-        // TODO: remove the following line when https://github.com/ziglang/zig/issues/25180 is fixed
-        .use_llvm = true,
-    });
+    const exe = makeExe(b, "zsum", target, optimize, null);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -62,31 +47,63 @@ pub fn build(b: *std.Build) void {
     ).step);
 }
 
+fn getOwnVersion(allocator: std.mem.Allocator) []const u8 {
+    const zon = std.zon.parse.fromSlice(
+        struct { version: []const u8 },
+        allocator,
+        @embedFile("build.zig.zon"),
+        null,
+        .{ .ignore_unknown_fields = true },
+    ) catch @panic("Failed to get program version");
+    return zon.version;
+}
+
+fn makeExe(
+    b: *std.Build,
+    name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    strip: ?bool,
+) *std.Build.Step.Compile {
+    const args_mod = b.dependency("args", .{}).module("args");
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", getOwnVersion(b.allocator));
+
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("zsum.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = strip,
+    });
+    exe_mod.addImport("args", args_mod);
+    exe_mod.addImport("options", options.createModule());
+
+    return b.addExecutable(.{
+        .name = name,
+        .root_module = exe_mod,
+        // TODO: remove the following line when https://github.com/ziglang/zig/issues/25180 is fixed
+        .use_llvm = true,
+    });
+}
+
 fn makeReleaseExe(
     b: *std.Build,
     os_tag: std.Target.Os.Tag,
     cpu_arch: std.Target.Cpu.Arch,
     name: []const u8,
 ) *std.Build.Step.Compile {
-    const args_mod = b.dependency("args", .{}).module("args");
-
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("zsum.zig"),
-        .target = b.resolveTargetQuery(.{
+    return makeExe(
+        b,
+        name,
+        b.resolveTargetQuery(.{
             .os_tag = os_tag,
             .cpu_arch = cpu_arch,
             .cpu_model = .determined_by_arch_os,
         }),
-        .optimize = .ReleaseFast,
-        .strip = true,
-    });
-    exe_mod.addImport("args", args_mod);
-
-    const exe = b.addExecutable(.{
-        .name = name,
-        .root_module = exe_mod,
-    });
-    return exe;
+        .ReleaseFast,
+        true,
+    );
 }
 
 fn getChecksum(
