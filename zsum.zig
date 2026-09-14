@@ -292,7 +292,7 @@ fn printErrorAndExit(
             ) catch {};
         },
         error.ListChecksumFlagConflict => {
-            stderr.writeAll("--list and --check cannot be used together.\n") catch {};
+            stderr.writeAll("--list and --checksum cannot be used together.\n") catch {};
         },
     }
     stderr.flush() catch {};
