@@ -12,7 +12,6 @@ pub fn main() !void {
 
     _ = args.skip(); // Skip exe name
     const zsum_path = args.next().?;
-    std.log.info("zsum: '{s}'", .{zsum_path});
     while (args.next()) |arg| {
         var zsum_proc: std.process.Child = .init(&.{ zsum_path, "--algo", "sha256" }, allocator);
         zsum_proc.stdin_behavior = .Pipe;
@@ -66,7 +65,6 @@ pub fn main() !void {
             },
         }
 
-        std.log.info("{s}    {s}", .{ hash, std.fs.path.basename(arg) });
         try stdout.interface.print("{s}    {s}\n", .{ hash, std.fs.path.basename(arg) });
     }
     try stdout.interface.flush();
